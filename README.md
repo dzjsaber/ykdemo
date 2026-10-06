@@ -1,77 +1,77 @@
-rag检索问答Demo
-基于LangChain+智能GLM的本地文档检索问答系统.
+# RAG 检索问答 Demo
 
- 项目背景：
+基于 LangChain + 智谱 GLM 的本地文档检索问答系统，包含手写版和 LangChain 版两套实现。
 
-大模型虽然知识广，但无法回答训练数据之外的私有文档内容，而且容易产生"幻觉"。
-本项目实现了一个最简 RAG（检索增强生成）流程：先从本地文档中检索相关内容，
-再让大模型基于这些内容回答问题，减少幻觉、提高答案可靠性。
+## 项目背景
 
-功能：
+大模型知识固定，无法回答私有文档内容，且容易产生“幻觉”。本项目实现了一个最简 RAG 流程：先检索文档中相关内容，再让模型基于这些内容回答。
+
+## 功能
 
 - 读取本地文档（txt）
-- 将文档切分为小块
--使用嵌入模型将文本转为向量
-- 基于余弦相似度检索与问题最相关的文档块
-- 调用大模型，基于检索内容生成回答
+- 文档切分（chunk_size=500，overlap=75）
+- Embedding 向量化（智谱 embedding-3）
+- 向量缓存（文档 MD5 做 key，文档未变则跳过计算）
+- 批量调用 Embedding 接口（单次 32 条）
+- 余弦相似度检索 + 相似度阈值过滤（低于 0.3 拒答）
+- 调用大模型生成回答（glm-4.7-flash，temperature=0.3）
+- 统一异常处理与日志输出
 
-技术栈：
+## 技术栈
 
--Python3
--LangChain
--法斯向量库
--智能GLM-4.7-闪存（对话模型）
--智谱embeding-3(向量模型)
+- Python 3
+- LangChain
+- FAISS 向量库
+- 智谱 GLM-4.7-Flash / embedding-3
 
- 项目结构：
+## 项目结构
 
+```
 ykdemo/
-├--main.py手写版：纯python实现完整RAG流程
-├--main_langchain.py Langchain版：用框架组件重写
-├--yingke.txt示例文档（英科医疗公司介绍）
-└--.gitignore
+├── main.py              # 手写版：完整 RAG 流程，含缓存、批量调用、异常处理
+├── main_langchain.py    # LangChain 版：用框架组件封装
+├── yingke.txt           # 示例文档
+└── .gitignore
+```
 
- 两个版本的对比：
+## 关键实现说明
 
-|维度|手写版(main.py)|Langchain版(main_langchain.py)|
-|文档加载|手动open().read()|TextLoader|
-|文档切分|自定义split_doc()|CharacterTextSplitter|
-|向量化|调用智谱嵌入API|OpenAIEmbeddings|
-|检索|手写余弦相似度|Faiss+Retriever|
-| 代码量 | 较长，每步可见 | 简洁，组件封装 |
+### 为什么切 500 字、15% 重叠
+中文一段话约 200-500 字，500 字能保住完整语义。15% 重叠防止答案刚好被切在块边界上。
 
-手写版帮助理解底层流程，LangChain 版展示框架封装能力。
+### 为什么用向量检索
+关键词匹配只能找字面相同的内容，向量检索通过语义相似度能找到意思相近的段落。例如问“公司靠什么营收”，即使文档中没有“营收”二字，也能命中“主营业务收入”。
 
- 运行方式：
+### 为什么设相似度阈值
+最高分低于 0.3 时直接拒答，避免不相关内容进入 Prompt 引发幻觉。
+
+### 为什么做向量缓存
+文档内容不变时，跳过 Embedding 计算，节省时间和 API 额度。
+
+## 运行方式
 
 1. 安装依赖
-PIP安装请求numpy langchain langchain-community langchain-openai faiss-cpu
+   ```bash
+   pip install requests numpy langchain langchain-community langchain-openai faiss-cpu
+   ```
 
-2.配置API密钥
-Windows
-set ZHIPU_API_KEY=你的key
-Linux/Mac
-export ZHIPU_API_KEY=你的key
+2. 配置 API Key
+   ```bash
+   # Windows
+   set ZHIPU_API_KEY=你的key
+   # Linux/Mac
+   export ZHIPU_API_KEY=你的key
+   ```
 
 3. 运行
-python main.py手写版
-Python main_langchain.py Langchain版
+   ```bash
+   python main.py              # 手写版
+   python main_langchain.py    # LangChain 版
+   ```
 
- 关键实现说明：
-
- 为什么需要切分文档
-大模型上下文窗口有限，无法一次读入整篇文档，需要切块后只把最相关的部分发过去。
-
-为什么用向量检索
-关键词匹配只能找"字面相同"的内容，向量检索通过语义相似度能找到"意思相近"的段落。
-例如问"公司靠什么营收"，即使文档中没有"营收"二字，也能命中"主营业务收入"相关内容。
-
-为什么用余弦相似度
-文本长短不同会导致向量长度不同，余弦相似度只看方向不看长度，更适合语义比较。
-
-后续改进方向：
+## 后续改进方向
 
 - 增加重排序（Rerank）提升检索精度
-- 用更强的 Embedding 模型提升语义匹配效果
--支持多格式文档(PDF、Word)
-- 加入对话历史，支持多轮问答
+- 支持多格式文档（PDF、Word）
+- 加入多轮对话历史
+- 用 FAISS 替代全量遍历，支持大文档
