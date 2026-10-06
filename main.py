@@ -14,8 +14,8 @@ EMBEDDING_URL = "https://open.bigmodel.cn/api/paas/v4/embeddings"
 EMBEDDING_MODEL = "embedding-3"
 
 # 切分参数（chunk太大语义混杂、太小语义不完整）
-CHUNK_SIZE = 500    # 中文文档推荐 500-800 字
-CHUNK_OVERLAP = 75  # 约15%重叠，避免答案被切在块边界上
+CHUNK_SIZE = 200    # 可自行调整
+CHUNK_OVERLAP = 30  # 约15%重叠，避免答案被切在块边界上
 
 # 检索参数
 TOP_K = 3           # 召回条数
