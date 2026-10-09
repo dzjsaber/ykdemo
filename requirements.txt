@@ -1,0 +1,17 @@
+# 基础
+requests>=2.31
+numpy>=1.24,<2
+python-dotenv>=1.0
+
+# 手写版 / Qwen-Agent 版：智谱 GLM 接口
+zhipuai>=2.1
+
+# LangChain 版
+langchain>=0.2,<0.3
+langchain-community>=0.2,<0.3
+langchain-text-splitters>=0.2,<0.3
+faiss-cpu>=1.8
+
+# Qwen-Agent 版
+qwen-agent>=0.0.34
+dashscope>=1.20

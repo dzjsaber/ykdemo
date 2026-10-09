@@ -1,5 +1,20 @@
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
 .idea/
 venv/
+.venv/
+
+# 密钥与本地配置
 .env
+
+# 向量缓存（可重建，不必进版本库）
+.cache/
+vectors.pkl
+faiss_index/
+
+# qwen-agent 运行时会生成的目录
+workspace/
+
+# 模型对比脚本的输出
+reports/
