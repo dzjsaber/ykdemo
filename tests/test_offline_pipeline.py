@@ -168,5 +168,89 @@ class RagToolCallTest(unittest.TestCase):
         self.assertIn("rag_search", TOOL_REGISTRY)
 
 
+class _FakeTool:
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = []
+
+    def call(self, params, **kwargs):
+        self.calls.append(params)
+        return self.reply
+
+
+class _FakeBot:
+    """模拟 qwen-agent Assistant：run() 每次 yield 一份累积的消息快照（含流式更新）。"""
+
+    def __init__(self, snapshots, tool_reply=config.REJECT_MSG):
+        self._snapshots = snapshots
+        self.tool = _FakeTool(tool_reply)
+        self.function_map = {"rag_search": self.tool}
+
+    def run(self, messages):
+        for extra in self._snapshots:
+            yield [dict(m) for m in messages] + [dict(m) for m in extra]
+
+
+class ToolCallFallbackTest(unittest.TestCase):
+    """针对两种"弱模型绕过工具"的兜底，以及拒答话术不被改写的规则。"""
+
+    def setUp(self):
+        from qwen_agent_rag.agent_demo import run_agent
+        self.run_agent = run_agent
+
+    def test_native_tool_call_is_counted_and_used(self):
+        bot = _FakeBot([
+            [{"role": "assistant", "content": ""},
+             {"role": "function", "name": "rag_search", "content": "总营收49.13亿元。"},
+             {"role": "assistant", "content": "总营收49.13亿元。"}],
+        ])
+        result = self.run_agent(bot, "英科医疗2025年上半年的营收是多少？", verbose=False)
+        self.assertEqual(result["tool_calls"], 1)
+        self.assertFalse(result["recovered_text_call"])
+        self.assertFalse(result["forced_tool_call"])
+        self.assertEqual(result["final"], "总营收49.13亿元。")
+
+    def test_recovers_text_style_tool_call(self):
+        # glm-4-flash 实测行为：把工具调用当正文写出来
+        bot = _FakeBot([
+            [{"role": "assistant", "content": 'rag_search\n{"query": "2025年上半年营收"}'}],
+        ], tool_reply="总营收49.13亿元。")
+        result = self.run_agent(bot, "英科医疗2025年上半年的营收是多少？", verbose=False)
+        self.assertTrue(result["recovered_text_call"])
+        self.assertEqual(bot.tool.calls, [{"query": "2025年上半年营收"}])
+        self.assertEqual(result["final"], "总营收49.13亿元。")
+
+    def test_forced_retrieval_when_model_answers_from_its_own_knowledge(self):
+        # glm-4-flash 实测行为：不调工具，直接编造"XX亿元"
+        bot = _FakeBot([
+            [{"role": "assistant", "content": "2025年上半年营收为XX亿元。"}],
+        ], tool_reply="总营收49.13亿元。")
+        result = self.run_agent(bot, "英科医疗的营收是多少？", verbose=False)
+        self.assertTrue(result["forced_tool_call"])
+        self.assertEqual(bot.tool.calls, [{"query": "英科医疗的营收是多少？"}])
+        self.assertEqual(result["final"], "总营收49.13亿元。")
+
+    def test_no_fallback_for_unrelated_question(self):
+        bot = _FakeBot([
+            [{"role": "assistant", "content": "快速排序的实现如下..."}],
+        ])
+        result = self.run_agent(bot, "帮我写一个Python快速排序", verbose=False)
+        self.assertEqual(result["tool_calls"], 0)
+        self.assertFalse(result["forced_tool_call"])
+        self.assertFalse(result["recovered_text_call"])
+        self.assertEqual(bot.tool.calls, [])
+
+    def test_refusal_is_never_rephrased_by_model(self):
+        # 模型拿到拒答话术后又想补一句"建议你去财经网站查询"，最终答案应该固定为拒答话术
+        bot = _FakeBot([
+            [{"role": "assistant", "content": ""},
+             {"role": "function", "name": "rag_search", "content": config.REJECT_MSG + "。"},
+             {"role": "assistant", "content": "很抱歉，我无法提供实时股价，建议查询财经网站。"}],
+        ])
+        result = self.run_agent(bot, "英科医疗今天的股价是多少？", verbose=False)
+        self.assertTrue(result["refusal_from_tool"])
+        self.assertEqual(result["final"], config.REJECT_MSG)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

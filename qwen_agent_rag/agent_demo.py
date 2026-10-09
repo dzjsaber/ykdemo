@@ -20,6 +20,9 @@ system_message 里写清了三条路由规则，这是让弱模型稳定调用�
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -36,8 +39,47 @@ SYSTEM_MESSAGE = (
     "你必须先调用 rag_search 工具，然后直接把工具返回的内容作为最终答案输出，"
     "不要用你自己的知识改写或补充，也不要再次调用 rag_search。\n"
     "2. 与英科医疗无关的问题（写代码、数学计算、闲聊等）直接回答，不要调用任何工具。\n"
-    "3. 如果工具返回的内容是拒答话术，就原样输出该话术。"
+    "3. 如果工具返回的内容是拒答话术，就原样输出该话术。\n"
+    "4. 调用工具必须走 Function Calling 接口，不要把工具名和参数当普通文字写出来。"
 )
+
+# 有些弱模型（实测 glm-4-flash）不走 Function Calling，而是把调用写成正文，例如：
+#     rag_search
+#     {"query": "英科医疗2025年上半年营收"}
+# 框架识别不到这种"文本工具调用"，会把它当最终答案直接吐给用户。
+# 这里做一次兜底：识别出来就真的执行工具，用工具结果替换这段文本。
+TEXT_TOOL_CALL_PATTERN = re.compile(r"rag_search\s*[：:\-]?\s*(\{.*?\})", re.DOTALL)
+
+# 关键词兜底：命中这些词的问题，如果模型没调工具（而是用自己的知识瞎答），
+# 就强制补一次检索——宁可规则兜底，也不让模型拿幻觉回答知识库问题。
+# 多个关键词用逗号分隔，设为空字符串可关闭（纯看模型自主决策）。
+FORCE_TOOL_KEYWORDS = tuple(
+    word.strip() for word in os.getenv("RAG_FORCE_TOOL_KEYWORDS", "英科").split(",")
+    if word.strip()
+)
+
+
+def needs_forced_tool_call(question: str) -> bool:
+    return any(word in question for word in FORCE_TOOL_KEYWORDS)
+
+
+def recover_text_tool_call(bot, text: str) -> Optional[str]:
+    """把"写成文字的 rag_search 调用"补成一次真实调用；不是这种情况返回 None。"""
+    if not text:
+        return None
+    match = TEXT_TOOL_CALL_PATTERN.search(text)
+    if not match:
+        return None
+    try:
+        params = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(params, dict) or not params.get("query"):
+        return None
+    tool = getattr(bot, "function_map", {}).get("rag_search")
+    if tool is None:
+        return None
+    return tool.call(params)
 
 
 def build_bot(model: Optional[str] = None, tool_cfg: Optional[dict] = None):
@@ -73,6 +115,9 @@ def run_agent(bot, question: str, max_tool_calls: int = 3, verbose: bool = True)
         final             最终回答
         tool_calls        rag_search 被调用的次数
         guard_triggered   是否因为超过 max_tool_calls 被强制中断
+        recovered_text_call  是否发生了"模型把工具调用写成文字、被兜底恢复"的情况
+        forced_tool_call     是否发生了"模型压根没调工具、被关键词规则强制检索"的情况
+        refusal_from_tool    工具是否已经明确拒答（此时最终回答固定为拒答话术）
         messages          全部消息
         error             异常信息（None 表示正常）
     """
@@ -80,25 +125,36 @@ def run_agent(bot, question: str, max_tool_calls: int = 3, verbose: bool = True)
     seen = 0
     tool_calls = 0
     guard_triggered = False
+    recovered_text_call = False
+    forced_tool_call = False
+    refusal_from_tool = False
     final = ""
     error = None
 
     try:
         for rsp in bot.run(messages):
-            for msg in rsp[seen:]:
-                seen += 1
+            new_messages = rsp[seen:]
+            seen = len(rsp)
+            for msg in new_messages:
                 role = msg.get("role")
                 content = _content_to_text(msg.get("content"))
                 if role == "function" and msg.get("name") == "rag_search":
                     tool_calls += 1
+                    if content.strip().startswith(config.REJECT_MSG):
+                        refusal_from_tool = True
                     if verbose:
                         print(f"\n--- rag_search 返回（第 {tool_calls} 次）---\n{content[:300]}")
                 elif role == "assistant" and content:
-                    final = content
                     if verbose:
                         print(f"\n--- 模型输出 ---\n{content[:300]}")
                 elif verbose and role == "assistant":
                     print("\n--- 模型请求调用工具（无文本）---")
+            # bot.run 是流式的：最后一条消息会边生成边更新，
+            # 所以每次拿到快照都要用最新的内容覆盖 final，否则只会留下第一个字。
+            tail = rsp[-1] if rsp else {}
+            tail_text = _content_to_text(tail.get("content"))
+            if tail.get("role") == "assistant" and tail_text.strip():
+                final = tail_text
             if tool_calls >= max_tool_calls:
                 guard_triggered = True
                 if verbose:
@@ -107,7 +163,37 @@ def run_agent(bot, question: str, max_tool_calls: int = 3, verbose: bool = True)
     except Exception as e:  # noqa: BLE001 - Agent 内部异常（鉴权/网络/模型名错误）统一往上抛给用户
         error = f"{type(e).__name__}: {e}"
 
+    # 兜底一：模型没走 Function Calling，而是把 rag_search 调用写成了正文
+    if error is None and tool_calls == 0:
+        recovered = recover_text_tool_call(bot, final)
+        if recovered:
+            recovered_text_call = True
+            tool_calls += 1
+            final = recovered
+            if verbose:
+                print(f"\n[兜底] 模型把工具调用写成了文字，已代为执行 rag_search：\n{recovered[:300]}")
+
+    # 兜底二：模型直接用自己的知识回答知识库问题（幻觉），按关键词强制检索
+    if error is None and tool_calls == 0 and needs_forced_tool_call(question):
+        tool = getattr(bot, "function_map", {}).get("rag_search")
+        if tool is not None:
+            forced_tool_call = True
+            tool_calls += 1
+            final = tool.call({"query": question})
+            if verbose:
+                print(f"\n[兜底] 模型没有调用工具，按关键词规则强制检索：\n{final[:300]}")
+
+    # 拒答话术不允许模型改写：工具已经明确说"知识库里没有"，
+    # 模型再补一句"建议你去财经网站查询"或者换个说法，都属于画蛇添足。
+    if error is None and final.strip().startswith(config.REJECT_MSG):
+        refusal_from_tool = True
+    if error is None and refusal_from_tool:
+        final = config.REJECT_MSG
+
     return {"final": final, "tool_calls": tool_calls, "guard_triggered": guard_triggered,
+            "recovered_text_call": recovered_text_call,
+            "forced_tool_call": forced_tool_call,
+            "refusal_from_tool": refusal_from_tool,
             "messages": list(messages), "error": error}
 
 

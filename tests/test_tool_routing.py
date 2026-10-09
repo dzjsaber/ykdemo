@@ -29,6 +29,7 @@ class ToolRoutingTest(unittest.TestCase):
 
         result = run_agent(self.bot, question, verbose=False)
         print(f"\n[{question}] → 工具调用 {result['tool_calls']} 次 | "
+              f"文本工具调用兜底：{'是' if result.get('recovered_text_call') else '否'} | "
               f"回答：{(result['final'] or '')[:120]}")
         return result
 
@@ -38,6 +39,8 @@ class ToolRoutingTest(unittest.TestCase):
         self.assertIsNone(result["error"], result["error"])
         self.assertGreaterEqual(result["tool_calls"], 1, "知识库问题没有调用 rag_search")
         self.assertNotIn(config.REJECT_MSG, result["final"] or "")
+        self.assertNotIn("rag_search", result["final"] or "",
+                         "工具调用不应以文字形式透给用户")
 
     def test_2_general_question_skips_tool(self):
         """非知识库问题：不应该调用工具。"""

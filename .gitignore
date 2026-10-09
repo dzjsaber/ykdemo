@@ -15,6 +15,3 @@ faiss_index/
 
 # qwen-agent 运行时会生成的目录
 workspace/
-
-# 模型对比脚本的输出
-reports/

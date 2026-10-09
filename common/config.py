@@ -55,8 +55,50 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def read_windows_env(name: str) -> str:
+    """Windows 上兜底从注册表读系统/用户环境变量。
+
+    如果 PyCharm / 终端在设置环境变量之前就已经启动，进程里是看不到这个变量的，
+    于是会出现"我明明配了 Key，程序却说没配"。这里再查一次注册表，
+    省得为了一个环境变量去重启 IDE。
+    """
+    if os.name != "nt":
+        return ""
+    try:
+        import winreg
+    except ImportError:  # pragma: no cover
+        return ""
+    locations = [
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+    ]
+    for hive, key_path in locations:
+        try:
+            with winreg.OpenKey(hive, key_path) as key:
+                value, _ = winreg.QueryValueEx(key, name)
+        except OSError:
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _lookup_api_key() -> str:
+    """按 环境变量 → 注册表 的顺序找智谱 Key。"""
+    for name in ("ZHIPU_API_KEY", "ZHIPUAI_API_KEY", "GLM_API_KEY"):
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return value
+    for name in ("ZHIPU_API_KEY", "ZHIPUAI_API_KEY", "GLM_API_KEY"):
+        value = read_windows_env(name)
+        if value:
+            return value
+    return ""
+
+
 # ========== 智谱 GLM 接口 ==========
-API_KEY = (os.getenv("ZHIPU_API_KEY") or os.getenv("ZHIPUAI_API_KEY") or "").strip()
+API_KEY = _lookup_api_key()
 API_BASE = os.getenv("ZHIPU_API_BASE", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
 CHAT_MODEL = os.getenv("RAG_CHAT_MODEL", "glm-4-flash")
 EMBEDDING_MODEL = os.getenv("RAG_EMBEDDING_MODEL", "embedding-3")

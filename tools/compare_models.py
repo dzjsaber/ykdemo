@@ -3,6 +3,7 @@
 
 对每个模型跑同一组用例，统计：
     - 工具调用次数（该调的有没有调、不该调的有没有乱调）
+    - 是否出现"把工具调用写成文字"（需要兜底恢复），这是弱模型最典型的失败模式
     - 是否触发死循环保护
     - 拒答是否正确
     - 单轮耗时
@@ -10,7 +11,7 @@
 用法（需要有效 ZHIPU_API_KEY，会产生 API 调用费用/额度）：
     python -m tools.compare_models --models glm-4-flash glm-4-air
     python -m tools.compare_models --models glm-4-flash glm-4-air --repeat 3
-    python -m tools.compare_models --out reports/model_comparison.md
+    python -m tools.compare_models --out docs/model_comparison.md
 """
 from __future__ import annotations
 
@@ -71,22 +72,26 @@ def main(argv=None) -> int:
                 print(f"  [{name}] 第{i + 1}次 → 工具调用 {result['tool_calls']} 次，"
                       f"拒答 {'是' if rejected else '否'}，耗时 {result['elapsed']:.1f}s，"
                       f"{'通过' if ok else '不符合预期'}")
+                if result.get("recovered_text_call"):
+                    print("      注意：模型把工具调用写成了文字，走了兜底恢复")
                 if result["error"]:
                     print(f"      错误：{result['error']}")
                 rows.append({
                     "model": model, "case": name, "round": i + 1,
                     "tool_calls": result["tool_calls"],
                     "guard": result["guard_triggered"],
+                    "recovered": result.get("recovered_text_call", False),
                     "rejected": rejected, "elapsed": result["elapsed"],
                     "ok": ok, "error": result["error"],
                 })
         print(f"  —— {model}: {passed}/{total} 通过")
 
     if args.out:
-        lines = ["| 模型 | 用例 | 工具调用次数 | 触发循环保护 | 拒答 | 耗时(s) | 是否符合预期 |",
-                 "| --- | --- | --- | --- | --- | --- | --- |"]
+        lines = ["| 模型 | 用例 | 工具调用次数 | 文本工具调用(走兜底) | 触发循环保护 | 拒答 | 耗时(s) | 是否符合预期 |",
+                 "| --- | --- | --- | --- | --- | --- | --- | --- |"]
         for row in rows:
             lines.append(f"| {row['model']} | {row['case']}#{row['round']} | {row['tool_calls']} | "
+                         f"{'是' if row['recovered'] else '否'} | "
                          f"{'是' if row['guard'] else '否'} | {'是' if row['rejected'] else '否'} | "
                          f"{row['elapsed']:.1f} | {'✅' if row['ok'] else '❌'} |")
         out_path = Path(args.out)
